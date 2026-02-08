@@ -7,7 +7,7 @@
 #
 set -e
 
-NGINX_VERSION="${1:-1.26.2}"
+NGINX_VERSION="${1:-1.28.2}"
 INSTALL_PREFIX="/opt/xpanel/nginx"
 OUTPUT_DIR="$(pwd)/output"
 
