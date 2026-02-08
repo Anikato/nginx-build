@@ -1,0 +1,124 @@
+name: Build Nginx
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: 'Nginx version to build (e.g. 1.26.2)'
+        required: true
+        default: '1.26.2'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Determine Nginx version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.nginx_version }}"
+          else
+            # Strip 'v' prefix from tag: v1.26.2 -> 1.26.2
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Building Nginx version: $VERSION"
+
+      - name: Build Nginx (amd64 - native)
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential wget libpcre3-dev zlib1g-dev libssl-dev
+          chmod +x build.sh
+          ./build.sh "${{ steps.version.outputs.version }}"
+
+      - name: Build Nginx (arm64 - QEMU/Docker)
+        if: matrix.arch == 'arm64'
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/build \
+            -w /build \
+            ubuntu:22.04 \
+            bash -c "apt-get update && apt-get install -y build-essential wget libpcre3-dev zlib1g-dev libssl-dev && chmod +x build.sh && ./build.sh ${{ steps.version.outputs.version }}"
+
+      - name: Package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          PKG_NAME="nginx-${VERSION}-linux-${ARCH}"
+
+          cd output
+          tar -czf "../${PKG_NAME}.tar.gz" .
+          cd ..
+          sha256sum "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-${{ matrix.arch }}
+          path: |
+            nginx-*.tar.gz
+            nginx-*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Nginx ${{ github.ref_name }}"
+          body: |
+            Pre-compiled Nginx binary for X-Panel.
+
+            ### Configure Options
+            ```
+            --with-http_ssl_module
+            --with-http_v2_module
+            --with-http_realip_module
+            --with-http_gzip_static_module
+            --with-http_stub_status_module
+            --with-stream
+            --with-stream_ssl_module
+            --with-pcre
+            ```
+
+            ### Usage
+            Download the tarball for your architecture and extract to `/opt/xpanel/nginx`:
+            ```bash
+            tar -xzf nginx-*-linux-amd64.tar.gz -C /opt/xpanel/nginx
+            ```
+
+            Or use X-Panel's built-in Nginx management to install automatically.
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sha256
